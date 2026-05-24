@@ -1,0 +1,199 @@
+name: CI/CD Pipeline - Pablo Guerrero
+
+# ============================================================
+# TRIGGERS (Automatizacion/Jobs) — cubre los 4 puntos (1.0pt)
+# ============================================================
+on:
+  # PUSH: se ejecuta al hacer push en main
+  push:
+    branches: [main]
+
+  # PULL REQUEST: se ejecuta en PRs hacia main
+  pull_request:
+    branches: [main]
+
+  # CRON: se ejecuta cada dia a las 06:00 UTC
+  schedule:
+    - cron: "0 6 * * *"
+
+  # MANUAL (workflow_dispatch): ejecucion manual con parametros personalizados
+  workflow_dispatch:
+    inputs:
+      entorno:
+        description: "Entorno de despliegue"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - produccion
+      ejecutar_tests:
+        description: "Ejecutar tests"
+        required: true
+        default: true
+        type: boolean
+      version_tag:
+        description: "Tag de version de la imagen Docker"
+        required: false
+        default: "latest"
+        type: string
+
+  # WEBHOOK: repository_dispatch permite disparar desde webhook externo
+  repository_dispatch:
+    types: [deploy-webhook]
+
+# ============================================================
+# VARIABLES DE ENTORNO GLOBALES
+# ============================================================
+env:
+  IMAGEN: practica-cicd
+  NODE_VERSION: "20"
+
+jobs:
+  # ============================================================
+  # JOB 1: BUILD — instala dependencias + lint (1.0pt)
+  # Se ejecuta en el RUNNER SELF-HOSTED (servidor Ubuntu)
+  # ============================================================
+  build:
+    name: "Build Software"
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v4
+
+      - name: Verificar entorno del servidor
+        run: |
+          echo "=== Servidor Ubuntu (self-hosted runner) ==="
+          hostname
+          (lsb_release -a 2>/dev/null) || cat /etc/os-release
+          echo "Node: $(node --version)"
+          echo "npm: $(npm --version)"
+          echo "Docker: $(docker --version)"
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint (eslint)
+        run: npm run lint
+
+      - name: Mostrar parametros de ejecucion
+        run: |
+          echo "Entorno: ${{ github.event.inputs.entorno || 'push-automatico' }}"
+          echo "Version tag: ${{ github.event.inputs.version_tag || 'latest' }}"
+          echo "Ejecutar tests: ${{ github.event.inputs.ejecutar_tests || 'true' }}"
+          echo "Trigger: ${{ github.event_name }}"
+
+  # ============================================================
+  # JOB 2: TEST — jest (1.0pt)
+  # ============================================================
+  test:
+    name: "Tests con jest"
+    runs-on: [self-hosted, linux]
+    needs: build
+    if: ${{ github.event.inputs.ejecutar_tests != 'false' }}
+
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar tests con jest
+        run: npm test 2>&1 | tee resultado-tests.txt
+
+      - name: Guardar resultado de tests como artefacto
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resultado-tests
+          path: resultado-tests.txt
+
+  # ============================================================
+  # JOB 3: ARTEFACTO DOCKER — build imagen + export tar (1.0pt)
+  # La imagen queda en el daemon Docker del servidor Ubuntu
+  # ============================================================
+  docker:
+    name: "Build Imagen Docker y Artefacto tar"
+    runs-on: [self-hosted, linux]
+    needs: test
+
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v4
+
+      - name: Construir imagen Docker
+        run: |
+          docker build -t ${{ env.IMAGEN }}:${{ github.event.inputs.version_tag || 'latest' }} .
+          docker build -t ${{ env.IMAGEN }}:${{ github.run_number }} .
+          echo "Imagen construida en el servidor:"
+          docker images | grep ${{ env.IMAGEN }}
+
+      - name: Exportar imagen como artefacto .tar
+        run: |
+          docker save ${{ env.IMAGEN }}:latest -o practica-cicd-imagen.tar
+          ls -lh practica-cicd-imagen.tar
+
+      - name: Subir artefacto tar
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagen-docker-tar-run-${{ github.run_number }}
+          path: practica-cicd-imagen.tar
+
+  # ============================================================
+  # JOB 4: DESPLIEGUE CONTINUO en servidor (1.0pt) + EVIDENCIAS (1.0pt)
+  # Levanta el contenedor de forma PERSISTENTE en el servidor Ubuntu
+  # ============================================================
+  deploy:
+    name: "Despliegue Continuo en Servidor"
+    runs-on: [self-hosted, linux]
+    needs: docker
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch'
+
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v4
+
+      - name: Parar despliegue anterior (si existe)
+        run: |
+          docker rm -f practica-cicd-app || true
+
+      - name: Desplegar contenedor en el servidor (puerto 5000)
+        run: |
+          docker run -d \
+            --name practica-cicd-app \
+            --restart unless-stopped \
+            -p 5000:5000 \
+            ${{ env.IMAGEN }}:${{ github.event.inputs.version_tag || 'latest' }}
+          echo "Contenedor desplegado de forma persistente"
+          sleep 3
+
+      - name: Verificar despliegue (evidencia post-despliegue)
+        run: |
+          echo "=== EVIDENCIA POST-DESPLIEGUE ===" | tee evidencia-despliegue.txt
+          echo "Fecha: $(date)" | tee -a evidencia-despliegue.txt
+          echo "Servidor: $(hostname)" | tee -a evidencia-despliegue.txt
+          echo "Entorno: ${{ github.event.inputs.entorno || 'produccion' }}" | tee -a evidencia-despliegue.txt
+          echo "Run number: ${{ github.run_number }}" | tee -a evidencia-despliegue.txt
+          echo "" | tee -a evidencia-despliegue.txt
+          echo "--- Contenedor en ejecucion ---" | tee -a evidencia-despliegue.txt
+          docker ps --filter "name=practica-cicd-app" | tee -a evidencia-despliegue.txt
+          echo "" | tee -a evidencia-despliegue.txt
+          echo "--- Respuesta HTTP ruta raiz ---" | tee -a evidencia-despliegue.txt
+          curl -s http://localhost:5000/ | tee -a evidencia-despliegue.txt
+          echo "" | tee -a evidencia-despliegue.txt
+          echo "--- Respuesta HTTP ruta /salud ---" | tee -a evidencia-despliegue.txt
+          curl -s http://localhost:5000/salud | tee -a evidencia-despliegue.txt
+          echo "" | tee -a evidencia-despliegue.txt
+          echo "--- Respuesta HTTP /operacion/7/3 ---" | tee -a evidencia-despliegue.txt
+          curl -s http://localhost:5000/operacion/7/3 | tee -a evidencia-despliegue.txt
+          echo "" | tee -a evidencia-despliegue.txt
+          echo "--- Logs del contenedor ---" | tee -a evidencia-despliegue.txt
+          docker logs practica-cicd-app | tee -a evidencia-despliegue.txt
+
+      - name: Guardar evidencia como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-despliegue-run-${{ github.run_number }}
+          path: evidencia-despliegue.txt
