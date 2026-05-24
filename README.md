@@ -1,5 +1,5 @@
 # Práctica CI/CD — GitHub Actions
-prueba cambio 2
+prueba cambio 3
 **Alumno:** Pablo Guerrero Gutiérrez
 
 App web en Node.js con un pipeline CI/CD que se ejecuta en un servidor Ubuntu propio (self-hosted runner): build, test, imagen Docker y despliegue automático.
