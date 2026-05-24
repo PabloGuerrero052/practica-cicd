@@ -5,3 +5,6 @@ coverage/
 dist/
 build/
 *.tar
+
+VIDEO_GUION.md
+SETUP_SERVIDOR.md

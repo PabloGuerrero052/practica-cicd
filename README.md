@@ -23,5 +23,3 @@ npm install
 npm start      # http://localhost:5000
 npm test
 ```
-
-Montaje del servidor: ver [SETUP_SERVIDOR.md](SETUP_SERVIDOR.md).
